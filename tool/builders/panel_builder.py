@@ -1,6 +1,6 @@
 from tool.helper import *
 from tool.builders.sql_builder import ChartSQLFactory
-from tool.builders.other_builder import IVCurveBuilder
+from tool.builders.other_builder import IVCurveBuilder, MMTSIVCurveBuilder, MMTSSensorsBuilder
 
 """
 This file defines the class for building the panels json file in Grafana.
@@ -12,16 +12,18 @@ class PanelBuilder:
     def __init__(self, datasource_uid):
         self.datasource_uid = datasource_uid
         self.IVCurveBuilder = IVCurveBuilder(datasource_uid)
+        self.MMTSIVCurveBuilder = MMTSIVCurveBuilder(datasource_uid)
+        self.MMTSSensorsBuilder = MMTSSensorsBuilder(datasource_uid)
     
     # -- Regular Panels --
-    def generate_sql(self, chart_type: str, table: str, condition: str, groupby: list, filters: list, distinct: bool, inputs: list, contains_inputs: dict = None) -> str:
+    def generate_sql(self, chart_type: str, table: str, condition: str, groupby: list, filters: list, distinct: bool, inputs: list) -> str:
         """Generate the SQL command from ChartSQLFactory. -> sql_builder.py
         """
         # Get Generator
         generator = ChartSQLFactory.get_generator(chart_type)
 
         # Generate SQL command
-        panel_sql = generator.generate_sql(table, condition, groupby, filters, distinct, inputs, contains_inputs)
+        panel_sql = generator.generate_sql(table, condition, groupby, filters, distinct, inputs)
 
         return panel_sql
 
@@ -35,7 +37,7 @@ class PanelBuilder:
         num_panels = len(config_panels)
 
         # set up the max number of panels per line:
-        if dashboard_title.startswith("Free") or "Module Assembly" in dashboard_title or 'IV_Curve Plot' in dashboard_title:
+        if dashboard_title.startswith("Free") or "Module Assembly" in dashboard_title or 'IV_Curve Plot' in dashboard_title or "MMTS IV Tests" in dashboard_title:
             max_num = 1
         elif dashboard_title == "Module Info" or "Environment Monitoring" in dashboard_title:
             max_num = 2
@@ -70,12 +72,12 @@ class PanelBuilder:
     def get_info(self, panel: dict, chart_type: str) -> tuple:
         """Get the information from the panel config by chart_type.
         """
-        if chart_type == "xychart":
+        if chart_type in ("xychart", "mmts_xychart", "mmts_timeseries"):
             filters = panel.get("filters", None)
             temp_condition = panel.get("temp_condition", None)
             rel_hum_condition = panel.get("rel_hum_condition", None)
             gridPos = panel.get("gridPos")
-            
+
             return filters, temp_condition, rel_hum_condition, gridPos
         
         else:
@@ -184,17 +186,42 @@ class PanelBuilder:
             chart_type = panel["chart_type"]
 
             try:
-                if chart_type == "xychart":
-                    filters, temp_condition, rel_hum_condition, gridPos = self.get_info(panel, chart_type)    # get conditions for SQL
-                    raw_sql = self.IVCurveBuilder.IV_curve_panel_sql(filters, temp_condition, rel_hum_condition)    # generate SQL
-                    override = self.IVCurveBuilder.IV_curve_panel_override()   # generate override for xy axises
+                if chart_type == "mmts_sensor_timeseries":
+                    metric = panel.get("metric")
+                    unit = panel.get("unit", "celsius")
+                    filters = panel.get("filters", None)
+                    gridPos = panel.get("gridPos")
+                    raw_sql = self.MMTSSensorsBuilder.mmts_sensor_timeseries_sql(metric, filters)
+                    panel_json = self.MMTSSensorsBuilder.generate_mmts_sensor_timeseries_panel(title, raw_sql, unit, gridPos)
+
+                elif chart_type == "xychart":
+                    filters, temp_condition, rel_hum_condition, gridPos = self.get_info(panel, chart_type)
+                    raw_sql = self.IVCurveBuilder.IV_curve_panel_sql(filters, temp_condition, rel_hum_condition)
+                    override = self.IVCurveBuilder.IV_curve_panel_override()
                     panel_json = self.IVCurveBuilder.generate_IV_curve_panel_new(title, raw_sql, override, gridPos)
+
+                elif chart_type == "mmts_xychart":
+                    filters, temp_condition, rel_hum_condition, gridPos = self.get_info(panel, chart_type)
+                    raw_sql = self.MMTSIVCurveBuilder.mmts_iv_curve_panel_sql(temp_condition, rel_hum_condition, filters)
+                    override = self.MMTSIVCurveBuilder.IV_curve_panel_override()
+                    panel_json = self.MMTSIVCurveBuilder.generate_IV_curve_panel_new(title, raw_sql, override, gridPos)
+
+                elif chart_type == "mmts_table":
+                    table_type = panel.get("table_type", "log")
+                    filters = panel.get("filters", None)
+                    gridPos = panel.get("gridPos")
+                    raw_sql = self.MMTSIVCurveBuilder.mmts_table_panel_sql(table_type, filters)
+                    panel_json = self.MMTSIVCurveBuilder.generate_mmts_table_panel(title, raw_sql, gridPos)
+
+                elif chart_type == "mmts_timeseries":
+                    filters, temp_condition, rel_hum_condition, gridPos = self.get_info(panel, chart_type)
+                    raw_sql = self.MMTSIVCurveBuilder.mmts_timeseries_panel_sql(temp_condition, rel_hum_condition, filters)
+                    panel_json = self.MMTSIVCurveBuilder.generate_mmts_timeseries_panel(title, raw_sql, gridPos)
 
                 else:
                     title, table, condition, groupby, filters, gridPos, distinct = self.get_info(panel, chart_type)
                     inputs = panel.get("inputs", None)
-                    contains_inputs = panel.get("contains_inputs", None)
-                    raw_sql = self.generate_sql(chart_type, table, condition, groupby, filters, distinct, inputs, contains_inputs)
+                    raw_sql = self.generate_sql(chart_type, table, condition, groupby, filters, distinct, inputs)
                     panel_json = self.generate_general_panel(title, raw_sql, table, chart_type, gridPos)
 
                 panels.append(panel_json)
