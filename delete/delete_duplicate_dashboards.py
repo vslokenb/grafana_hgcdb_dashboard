@@ -8,30 +8,38 @@ import requests
 from tool.helper import *
 
 """
-One-shot cleanup: find every Grafana folder that the dashboard builder manages,
-group dashboards by title, and delete all but the newest copy of each title.
+One-shot cleanup: query Grafana directly for every folder and dashboard,
+group dashboards by title within each folder, and delete all but the
+newest copy of each title.
 
-Run this once after pulling the duplicate-fix branch, then re-run main.py to
-get a clean single copy of every dashboard.
+Usage:
+    python delete/delete_duplicate_dashboards.py            # delete for real
+    python delete/delete_duplicate_dashboards.py --dry-run  # preview only
 """
 
-DRY_RUN = "--dry-run" in sys.argv   # pass --dry-run to preview without deleting
+DRY_RUN = "--dry-run" in sys.argv
 
-def search_dashboards_in_folder(folder_uid: str) -> list:
-    """Return all dashboard stubs inside a folder (or the General folder if folder_uid='')."""
+
+def get_all_folders() -> list:
+    """Return all Grafana folders (does not include the General / root folder)."""
+    resp = requests.get(f"{GF_URL}/api/folders", headers=client.headers, params={"limit": 500})
+    resp.raise_for_status()
+    return resp.json()   # list of {uid, title, ...}
+
+
+def search_dashboards(folder_uid: str = None) -> list:
+    """Return all dashboard stubs in a folder (or root if folder_uid is None)."""
     params = {"type": "dash-db", "limit": 500}
     if folder_uid:
         params["folderUIDs"] = folder_uid
     else:
         params["folderUIDs"] = "general"
-
     resp = requests.get(f"{GF_URL}/api/search", headers=client.headers, params=params)
     resp.raise_for_status()
     return resp.json()
 
 
-def get_dashboard_version(uid: str) -> int:
-    """Fetch the current version number of a dashboard by UID."""
+def get_version(uid: str) -> int:
     resp = requests.get(f"{GF_URL}/api/dashboards/uid/{uid}", headers=client.headers)
     if resp.status_code == 200:
         return resp.json().get("dashboard", {}).get("version", 0)
@@ -41,57 +49,60 @@ def get_dashboard_version(uid: str) -> int:
 def delete_dashboard(uid: str, title: str):
     resp = requests.delete(f"{GF_URL}/api/dashboards/uid/{uid}", headers=client.headers)
     if resp.status_code in (200, 204):
-        print(f"  [DELETED] '{title}' (uid={uid})")
+        print(f"    [DELETED] '{title}'  uid={uid}")
     else:
-        print(f"  [ERROR]   '{title}' (uid={uid}) → {resp.status_code}: {resp.text}")
+        print(f"    [ERROR]   '{title}'  uid={uid}  → {resp.status_code}: {resp.text}")
 
 
-# Collect all folder UIDs we care about (everything in GF_FOLDER_UIDS + General)
-folder_map = gf_conn.get("GF_FOLDER_UIDS", {})
-folders_to_check = {"General": ""}   # name → uid
-for name, uid in folder_map.items():
-    if uid:
-        folders_to_check[name] = uid
+def process_folder(folder_name: str, folder_uid: str = None):
+    dashboards = search_dashboards(folder_uid)
+    if not dashboards:
+        return
 
-total_deleted = 0
-
-for folder_name, folder_uid in sorted(folders_to_check.items()):
-    dashboards = search_dashboards_in_folder(folder_uid)
-
-    # Group by title
     by_title = defaultdict(list)
     for d in dashboards:
         by_title[d["title"]].append(d)
 
-    duplicates_in_folder = {t: copies for t, copies in by_title.items() if len(copies) > 1}
-
-    if not duplicates_in_folder:
+    dupes = {t: c for t, c in by_title.items() if len(c) > 1}
+    if not dupes:
         print(f"[Folder] '{folder_name}' — no duplicates.")
-        continue
+        return
 
-    print(f"\n[Folder] '{folder_name}' — {len(duplicates_in_folder)} title(s) with duplicates:")
+    print(f"\n[Folder] '{folder_name}' — {len(dupes)} title(s) with duplicates:")
+    global total_deleted
 
-    for title, copies in sorted(duplicates_in_folder.items()):
-        # Fetch version for each copy so we can keep the newest
-        versioned = []
-        for d in copies:
-            v = get_dashboard_version(d["uid"])
-            versioned.append((v, d["uid"], d["title"]))
-            print(f"  uid={d['uid']}  version={v}")
+    for title, copies in sorted(dupes.items()):
+        versioned = [(get_version(d["uid"]), d["uid"]) for d in copies]
+        versioned.sort(reverse=True)
 
-        versioned.sort(reverse=True)   # highest version = newest
+        print(f"  Title: '{title}'")
+        for v, uid in versioned:
+            print(f"    uid={uid}  version={v}")
+
         keep_uid = versioned[0][1]
-        print(f"  → keeping uid={keep_uid} (version {versioned[0][0]})")
+        print(f"    → keeping uid={keep_uid}  (version {versioned[0][0]})")
 
-        for version, uid, t in versioned[1:]:
+        for v, uid in versioned[1:]:
             if DRY_RUN:
-                print(f"  [DRY-RUN] would delete '{t}' (uid={uid}, version={version})")
+                print(f"    [DRY-RUN] would delete uid={uid}  version={v}")
             else:
-                delete_dashboard(uid, t)
+                delete_dashboard(uid, title)
                 total_deleted += 1
 
+
+# ── main ──────────────────────────────────────────────────────────────────────
+total_deleted = 0
+
+# Root / General folder
+process_folder("General", folder_uid=None)
+
+# Every named folder Grafana knows about
+for folder in get_all_folders():
+    process_folder(folder["title"], folder["uid"])
+
 if DRY_RUN:
-    print(f"\nDry run complete — no dashboards deleted.")
+    print("\nDry run complete — nothing deleted.")
 else:
-    print(f"\nDone. Deleted {total_deleted} duplicate dashboard(s).")
-    print("Run 'python main.py' to recreate all dashboards cleanly.")
+    print(f"\nDone. {total_deleted} duplicate(s) deleted.")
+    if total_deleted:
+        print("Run 'python main.py' to recreate dashboards cleanly.")
