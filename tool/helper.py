@@ -318,23 +318,25 @@ class GrafanaClient:
 
     def upload_dashboard_json(self, dashboard_json: dict, folder_uid: str):
         """Upload a dashboard to a folder, creating or overwriting as needed."""
-        dashboard_json.pop("id", None)
-
         uid = dashboard_json.get("uid")
 
-        # Grafana 12+ (k8s storage) requires the current version for updates.
-        # Fetch it if the dashboard already exists; omit for new dashboards.
+        # Grafana 12+ (k8s storage) requires both the current `id` and `version`
+        # to perform an in-place update.  Fetch them if the dashboard already
+        # exists; clear both for a fresh create.
         if uid:
             check = requests.get(
                 f"{self.base_url}/api/dashboards/uid/{uid}",
                 headers=self.headers
             )
             if check.status_code == 200:
-                current_version = check.json().get("dashboard", {}).get("version", 1)
-                dashboard_json["version"] = current_version
+                existing = check.json().get("dashboard", {})
+                dashboard_json["id"]      = existing.get("id")
+                dashboard_json["version"] = existing.get("version", 1)
             else:
+                dashboard_json["id"]      = None
                 dashboard_json.pop("version", None)  # fresh create — no version needed
         else:
+            dashboard_json["id"]      = None
             dashboard_json.pop("version", None)
 
         payload = {
