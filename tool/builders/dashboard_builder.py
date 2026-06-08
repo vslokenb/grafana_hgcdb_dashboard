@@ -15,8 +15,7 @@ class DashboardBuilder:
     def build_dashboard(self, dashboard_title: str, panels: list, template_list: list) -> dict:
         """Generates a Grafana dashboard json file based on the given panels.
         """
-        # Prefix with "dash-" so dashboard UIDs never collide with folder UIDs
-        dashboard_uid = "dash-" + create_uid(dashboard_title)
+        dashboard_uid = create_uid(dashboard_title)
 
         # define the time range
         if "Environment Monitoring" in dashboard_title:
