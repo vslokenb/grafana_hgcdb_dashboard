@@ -1,15 +1,22 @@
 # Setting for Grafana
 
-# Things might need to change:
-GF_PORT: '3000' # default
-GF_PROTOCAL: 'http'  # default
+# Things to set before first run:
+GF_PORT: '3000'       # Grafana port (default 3000)
+GF_PROTOCAL: 'http'   # http or https
 
-# Things will be auto-updated:
-GF_USER: 'admin' # default
-GF_PASS: 'admin' # default
+# Grafana working account — must be at least Org Editor.
+GF_USER: 'apdlab'
+GF_PASS: 'ttu_apdlab'
+
+# Grafana super-admin account — used once to promote GF_USER to Org Admin.
+# Use the built-in 'admin' account (or any other Server/Org Admin account).
+GF_SUPER_USER: 'admin'   # Grafana built-in admin username
+GF_SUPER_PASS: ''        # Admin password
+
+# Auto-updated by main.py — do not edit these manually:
 GF_SA_NAME: ""
 GF_SA_ID: ""
 GF_DATA_SOURCE_NAME: ""
 GF_API_KEY: ""
 GF_DATA_SOURCE_UID: ""
-GF_RUN_TIMES: 0 # this will be updated automatically according to the run time of the `main.py` script
+GF_RUN_TIMES: 0 # incremented each run; set back to 0 to force preSteps to re-run
