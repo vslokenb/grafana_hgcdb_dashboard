@@ -72,6 +72,9 @@ def process_folder(folder_name: str, folder_uid: str = None):
     global total_deleted
 
     for title, copies in sorted(dupes.items()):
+        # Canonical UID = what the code generates (no dash- prefix)
+        target_uid = create_uid(title)
+
         versioned = [(get_version(d["uid"]), d["uid"]) for d in copies]
         versioned.sort(reverse=True)
 
@@ -79,10 +82,16 @@ def process_folder(folder_name: str, folder_uid: str = None):
         for v, uid in versioned:
             print(f"    uid={uid}  version={v}")
 
-        keep_uid = versioned[0][1]
-        print(f"    → keeping uid={keep_uid}  (version {versioned[0][0]})")
+        # Prefer canonical UID; fall back to highest version if canonical isn't present
+        canonical_match = next((uid for _, uid in versioned if uid == target_uid), None)
+        keep_uid = canonical_match if canonical_match else versioned[0][1]
+        keep_ver  = next(v for v, uid in versioned if uid == keep_uid)
+        print(f"    → keeping uid={keep_uid}  (version {keep_ver})"
+              + ("  [canonical]" if canonical_match else "  [highest-version fallback]"))
 
-        for v, uid in versioned[1:]:
+        for v, uid in versioned:
+            if uid == keep_uid:
+                continue
             if DRY_RUN:
                 print(f"    [DRY-RUN] would delete uid={uid}  version={v}")
             else:
