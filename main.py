@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from time import sleep
 
 import yaml
@@ -28,29 +29,22 @@ def main():
 
     run_times = int(gf_conn.get('GF_RUN_TIMES'))
 
-    # First run
-    if run_times == 0:
-        print(" >> First run, preSteps will be executed.\n")
+    # Validate stored token before deciding to skip preSteps
+    token_valid = client.validate_api_key()
 
-        # preSteps in order
-        subprocess.run(["python", "./preSteps/get_api_key.py"], check=True)
-        sleep(0.5)    # wait for token to be generated
+    if not token_valid:
+        print(" >> Auth check failed. Verify GF_SUPER_USER/GF_SUPER_PASS in gf_conn.yaml.\n")
+        sys.exit(1)
 
-        # rebuild GrafanaClient with new token
-        gf_conn.reload()
-        new_token = gf_conn.get("GF_API_KEY")
-        client = GrafanaClient(new_token, GF_URL)
-
-        subprocess.run(["python", "./preSteps/add_dbsource.py"], check=True)
-
-    else:
-        print(" >>>> preSteps skipped.\n")
+    # Always ensure the PostgreSQL datasource is registered (idempotent — skips if already exists)
+    subprocess.run([sys.executable, "./preSteps/add_dbsource.py"])
 
     # Everything Need To Generate
-    subprocess.run(["python", "create/create_folders.py"], check=True)
+    subprocess.run([sys.executable, "create/create_folders.py"], check=True)
     sleep(0.5)    # wait for folders to be added
-    subprocess.run(["python", "create/create_dashboards.py"], check=True)
-    # subprocess.run(["python", "create/create_alerts.py"], check=True)
+    subprocess.run([sys.executable, "create/create_dashboards.py"], check=True)
+    subprocess.run([sys.executable, "create/create_static_dashboards.py"], check=True)
+    # subprocess.run([sys.executable, "create/create_alerts.py"], check=True)
 
     # Add run times
     gf_conn.set('GF_RUN_TIMES', run_times + 1)

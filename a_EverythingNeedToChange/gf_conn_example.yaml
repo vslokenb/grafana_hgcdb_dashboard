@@ -5,8 +5,8 @@ GF_PORT: '3000' # default
 GF_PROTOCAL: 'http'  # default
 
 # Things will be auto-updated:
-GF_USER: 'admin' # default
-GF_PASS: 'admin' # default
+GF_USER: 'apdlab' # default
+GF_PASS: 'ttuapdlab' # default
 GF_SA_NAME: ""
 GF_SA_ID: ""
 GF_DATA_SOURCE_NAME: ""

@@ -75,57 +75,150 @@ class ConfigLoader:
 
 
 class GrafanaClient:
-    def __init__(self, api_token: str, gf_url: str):
+    def __init__(self, api_token: str, gf_url: str, username: str = None, password: str = None):
+        import base64
         self.base_url = gf_url.rstrip('/')
-        self.headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json"
-        }
+        self.headers = {"Content-Type": "application/json"}
+        if api_token:
+            self.headers["Authorization"] = f"Bearer {api_token}"
+        elif username and password:
+            creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+            self.headers["Authorization"] = f"Basic {creds}"
     
-    def create_service_account_and_token(self, sa_name: str, token_name: str, username: str, password: str) -> str:
-        """Create a service account and return the API token string.
+    def validate_api_key(self) -> bool:
+        """Return True if the current Bearer token has write access to Grafana."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/org",
+                headers=self.headers,
+                timeout=5
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def get_or_create_service_account_token(self, sa_name: str, token_name: str, username: str, password: str) -> tuple:
+        """Find an existing service account by name (or create it), revoke all old tokens, and issue a fresh one.
+        Uses basic auth so it works even when the stored Bearer token is stale or missing.
         """
-        # Create service account
-        sa_payload = {
-            "name": sa_name,
-            "role": "Admin"
-        }
+        basic_auth   = (username, password)
+        json_headers = {"Content-Type": "application/json"}
 
-        sa_res = requests.post(
-            f"{self.base_url}/api/serviceaccounts",
-            headers={"Content-Type": "application/json"},
-            auth=(username, password),
-            data=json.dumps(sa_payload)
+        # Search for existing service account
+        search_res = requests.get(
+            f"{self.base_url}/api/serviceaccounts/search?query={sa_name}&limit=10",
+            headers=json_headers,
+            auth=basic_auth
         )
-        sa_res.raise_for_status()
-        sa_id = sa_res.json()["id"]
+        search_res.raise_for_status()
 
-        # Create token
-        token_payload = {
-            "name": token_name,
-            "secondsToLive": 0  # forever
-        }
+        accounts  = search_res.json().get("serviceAccounts", [])
+        existing  = next((a for a in accounts if a["name"] == sa_name), None)
 
+        if existing:
+            sa_id = existing["id"]
+            print(f"[Grafana] Found existing service account '{sa_name}' (id={sa_id}).")
+
+            # Revoke all old tokens so the stored key can never shadow the new one
+            tokens_res = requests.get(
+                f"{self.base_url}/api/serviceaccounts/{sa_id}/tokens",
+                headers=json_headers,
+                auth=basic_auth
+            )
+            tokens_res.raise_for_status()
+            for tok in tokens_res.json():
+                del_res = requests.delete(
+                    f"{self.base_url}/api/serviceaccounts/{sa_id}/tokens/{tok['id']}",
+                    headers=json_headers,
+                    auth=basic_auth
+                )
+                del_res.raise_for_status()
+                print(f"[Grafana] Revoked old token '{tok['name']}'.")
+        else:
+            # Create service account with Admin role
+            sa_res = requests.post(
+                f"{self.base_url}/api/serviceaccounts",
+                headers=json_headers,
+                auth=basic_auth,
+                data=json.dumps({"name": sa_name, "role": "Admin"})
+            )
+            sa_res.raise_for_status()
+            sa_id = sa_res.json()["id"]
+            print(f"[Grafana] Created service account '{sa_name}' (id={sa_id}) with Admin role.")
+
+        # Issue fresh token (no expiry)
         token_res = requests.post(
             f"{self.base_url}/api/serviceaccounts/{sa_id}/tokens",
-            headers={"Content-Type": "application/json"},
-            auth=(username, password),
-            data=json.dumps(token_payload)
+            headers=json_headers,
+            auth=basic_auth,
+            data=json.dumps({"name": token_name, "secondsToLive": 0})
         )
         token_res.raise_for_status()
         api_key = token_res.json()["key"]
-        print(f"[Grafana] Service account '{sa_name}' and API token created.")
+        print(f"[Grafana] Issued fresh API token for '{sa_name}'.")
 
         return sa_id, api_key
 
+    def ensure_org_admin_role(self, target_username: str, super_user: str, super_pass: str) -> bool:
+        """Use super-admin credentials to promote target_username to Org Admin.
+        Returns True if the role was set, False if super credentials are missing/failed.
+        """
+        import base64
+        if not super_user or not super_pass:
+            print("[Role] GF_SUPER_USER/GF_SUPER_PASS not configured — skipping role promotion.")
+            return False
+
+        admin_creds = base64.b64encode(f"{super_user}:{super_pass}".encode()).decode()
+        admin_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {admin_creds}"
+        }
+
+        # List org users to find target user's ID
+        resp = requests.get(f"{self.base_url}/api/org/users", headers=admin_headers)
+        if resp.status_code != 200:
+            print(f"[Role] Cannot list org users ({resp.status_code}) — check GF_SUPER_USER/GF_SUPER_PASS.")
+            return False
+
+        users = resp.json()
+        target = next((u for u in users if u.get("login") == target_username), None)
+        if not target:
+            print(f"[Role] User '{target_username}' not found in org.")
+            return False
+
+        if target.get("role") == "Admin":
+            print(f"[Role] '{target_username}' already has Org Admin role — nothing to do.")
+            return True
+
+        user_id = target["userId"]
+        patch = requests.patch(
+            f"{self.base_url}/api/org/users/{user_id}",
+            headers=admin_headers,
+            json={"role": "Admin"}
+        )
+        if patch.status_code == 200:
+            print(f"[Role] '{target_username}' promoted to Org Admin.")
+            return True
+        else:
+            print(f"[Role] Failed to promote '{target_username}': {patch.status_code} — {patch.text}")
+            return False
+
     def add_postgres_datasource(
-        self, 
+        self,
         datasource_name: str, datasource_uid: str,
         db_host: str, db_port: str,
         db_name: str, db_user: str, db_password: str
     ):
-        """Add a PostgreSQL data source to Grafana using current API token.
-        """
+        """Add a PostgreSQL data source to Grafana. Skips creation if it already exists."""
+        # Check if datasource already exists (GET works for any authenticated role)
+        check = requests.get(
+            f"{self.base_url}/api/datasources/uid/{datasource_uid}",
+            headers=self.headers
+        )
+        if check.status_code == 200:
+            print(f"[Grafana] Data source '{datasource_name}' already exists — skipping creation. (´･ω･`)\n")
+            return
+
         payload = {
             "name": datasource_name,
             "type": "postgres",
@@ -133,19 +226,13 @@ class GrafanaClient:
             "url": f"{db_host}:{db_port}",
             "database": db_name,
             "user": db_user,
-            "secureJsonData": {
-                "password": db_password
-            },
+            "secureJsonData": {"password": db_password},
             "isDefault": True,
             "editable": True,
             "uid": datasource_uid,
-            "jsonData": {
-                "sslmode": "disable",
-                "alerting": True
-            }
+            "jsonData": {"sslmode": "disable", "alerting": True}
         }
 
-        # Add data source
         response = requests.post(
             f"{self.base_url}/api/datasources",
             headers=self.headers,
@@ -153,11 +240,12 @@ class GrafanaClient:
         )
 
         if response.status_code in [200, 201]:
-            print(f"[Grafana] PostgreSQL data source '{datasource_name}' added as default... (`∀´σ) \n")
-        elif response.status_code == 409:
-            print(f"[Grafana] Data source '{datasource_name}' already exists.  (´･ω･`) \n")
+            print(f"[Grafana] PostgreSQL data source '{datasource_name}' added as default. (`∀´σ)\n")
+        elif response.status_code == 403:
+            print(f"[Grafana] Cannot create data source — account lacks datasources:create permission.")
+            print(f"[Grafana] If the datasource already exists in Grafana, this can be ignored.\n")
         else:
-            print(f"[Grafana] Failed to add data source: {response.status_code} ヽ(`Д´)ﾉ \n")
+            print(f"[Grafana] Failed to add data source: {response.status_code} ヽ(`Д´)ﾉ\n")
             print(response.text)
             response.raise_for_status()
     
@@ -170,16 +258,48 @@ class GrafanaClient:
         url = f"{self.base_url}/api/folders/{uid}"
         response = requests.get(url, headers=self.headers)
 
-        if response.status_code == 200:     # folder exist
+        if response.status_code == 200:     # folder exists
             return response.json()['uid']
-        elif response.status_code == 404:   # create folder
+        elif response.status_code in (404, 403):
+            # 404 = doesn't exist; 403 = no global folders:read (apdlab edge case for new folders)
+            # In both cases, try to create. If it already exists Grafana returns 409.
             payload = {"title": title, "uid": uid}
-            response = requests.post(f"{self.base_url}/api/folders", headers=self.headers, json=payload)
-            response.raise_for_status()
-            return response.json()['uid']
+            create_resp = requests.post(f"{self.base_url}/api/folders", headers=self.headers, json=payload)
+            if create_resp.status_code in (200, 201):
+                return create_resp.json()['uid']
+            elif create_resp.status_code == 409:
+                # Folder already exists — search by title to get the real UID
+                search_resp = requests.get(
+                    f"{self.base_url}/api/folders",
+                    headers=self.headers,
+                    params={"limit": 200}
+                )
+                if search_resp.status_code == 200:
+                    for folder in search_resp.json():
+                        if folder.get("uid") == uid or folder.get("title") == title:
+                            return folder["uid"]
+                return uid  # fallback: return the computed uid
+            else:
+                create_resp.raise_for_status()
         else:
             raise Exception(f"Error checking folder: {response.status_code} - {response.text}")
     
+    def delete_folder(self, folder_uid: str) -> bool:
+        """Delete a Grafana folder and all dashboards inside it."""
+        response = requests.delete(
+            f"{self.base_url}/api/folders/{folder_uid}",
+            headers=self.headers
+        )
+        if response.status_code in (200, 204):
+            print(f"[Delete] Folder '{folder_uid}' deleted.")
+            return True
+        elif response.status_code == 404:
+            print(f"[Delete] Folder '{folder_uid}' not found — already gone.")
+            return True
+        else:
+            print(f"[Delete] Failed to delete folder '{folder_uid}': {response.status_code} — {response.text}")
+            return False
+
     def dashboard_exists(self, uid: str) -> bool:
         """Check if a dashboard with the given uid exists.
         """
@@ -197,21 +317,30 @@ class GrafanaClient:
         return dashboard.get("uid") == uid
 
     def upload_dashboard_json(self, dashboard_json: dict, folder_uid: str):
-        """Upload a dashboard to a folder.
-        """
+        """Upload a dashboard to a folder, creating or overwriting as needed."""
+        dashboard_json.pop("id", None)
+
         uid = dashboard_json.get("uid")
 
-        if uid and self.dashboard_exists(uid):
-            # update
-            overwrite = True
+        # Grafana 12+ (k8s storage) requires the current version for updates.
+        # Fetch it if the dashboard already exists; omit for new dashboards.
+        if uid:
+            check = requests.get(
+                f"{self.base_url}/api/dashboards/uid/{uid}",
+                headers=self.headers
+            )
+            if check.status_code == 200:
+                current_version = check.json().get("dashboard", {}).get("version", 1)
+                dashboard_json["version"] = current_version
+            else:
+                dashboard_json.pop("version", None)  # fresh create — no version needed
         else:
-            # create
-            overwrite = False
+            dashboard_json.pop("version", None)
 
         payload = {
             "dashboard": dashboard_json,
             "folderUid": folder_uid,
-            "overwrite": overwrite
+            "overwrite": True
         }
 
         # Upload dashboard
@@ -484,6 +613,8 @@ GF_URL          = f"{GF_PROTOCAL}://127.0.0.1:{GF_PORT}"
 GF_API_KEY      = gf_conn.get('GF_API_KEY')
 GF_USER         = gf_conn.get('GF_USER')
 GF_PASS         = gf_conn.get('GF_PASS')
+GF_SUPER_USER   = gf_conn.get('GF_SUPER_USER', '')
+GF_SUPER_PASS   = gf_conn.get('GF_SUPER_PASS', '')
 GF_DS_NAME      = gf_conn.get('GF_DATA_SOURCE_NAME')
 GF_DS_UID       = gf_conn.get('GF_DATA_SOURCE_UID')
 
@@ -603,4 +734,8 @@ DERIVED_FILTER_SQL = {
 }
 
 # -- Set GrafanaClient --
-client = GrafanaClient(GF_API_KEY, GF_URL)
+# Use super-admin credentials if configured so folder/dashboard operations have full permissions.
+# Falls back to GF_USER/GF_PASS if super credentials are absent.
+_gf_client_user = GF_SUPER_USER if GF_SUPER_USER else GF_USER
+_gf_client_pass = GF_SUPER_PASS if GF_SUPER_USER else GF_PASS
+client = GrafanaClient(GF_API_KEY, GF_URL, username=_gf_client_user, password=_gf_client_pass)

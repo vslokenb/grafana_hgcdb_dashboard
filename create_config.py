@@ -12,13 +12,13 @@ db_conn = {
     # Setting for hgcdb database
         # Should be the same as local database settings
 
-    'dbname': 'hgcdb',
+    'dbname': 'ttu_mac_local',
     'port': '5432',   
-    'db_hostname': 'localhost',  # 'localhost' 
-    'institution_abbr': 'CMU',  # update this: CMU, IHEP, NTU, TTU, TIFR, UCSB
+    'db_hostname': '129.118.107.198',  # 'localhost' 
+    'institution_abbr': 'TTU',  # update this: CMU, IHEP, NTU, TTU, TIFR, UCSB
 
     'user': 'viewer',  # recommended
-    'password': ''  # your password
+    'password': 'mac'  # your password
 }
 
 gf_conn = {
@@ -29,8 +29,8 @@ gf_conn = {
     'GF_PROTOCAL': 'http', # default
 
     # Things will be auto-updated:
-    'GF_USER': 'admin', # default
-    'GF_PASS': 'admin', # default
+    'GF_USER': 'apdlab', # default
+    'GF_PASS': 'ttuapdlab', # default
     'GF_SA_NAME': "",
     'GF_SA_ID': "",
     'GF_DATA_SOURCE_NAME': "",

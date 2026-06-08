@@ -115,13 +115,13 @@ for config in filelist:
 
         # Loop for every panel in a dashboard
         for panel in config_panels:
-            special_chart_type = ["text", "xychart"]    # skip `text` and `xychart` panels
+            special_chart_type = ["text", "xychart", "mmts_xychart", "mmts_table", "mmts_timeseries", "mmts_sensor_timeseries"]
             chart_type = panel["chart_type"]
 
             # Generate the template json
             if chart_type not in special_chart_type:
-                filters = panel["filters"]
-                inputs = panel.get("inputs", None)
+                filters = panel.get("filters")
+                inputs = panel.get("inputs")
                 if filters:
                     filter_json = filter_builder.build_template_list(filters, exist_filter)
                     template_list.extend(filter_json)
@@ -131,13 +131,31 @@ for config in filelist:
                     template_list.extend(input_json)
 
             elif chart_type == "xychart":
-                filters = panel["filters"]
+                filters = panel.get("filters")
                 # special case for IV curve
                 module_num_input = filter_builder.build_iv_curve_filters(exist_filter)
                 template_list.extend(module_num_input)
                 # regular filters
-                filter_json = filter_builder.build_template_list(filters, exist_filter)
-                template_list.extend(filter_json)
+                if filters:
+                    filter_json = filter_builder.build_template_list(filters, exist_filter)
+                    template_list.extend(filter_json)
+
+            elif chart_type in ("mmts_xychart", "mmts_table", "mmts_timeseries"):
+                # N_MODULE_SHOW textbox (shared across all MMTS panels in this dashboard)
+                mmts_num_input = filter_builder.build_mmts_filters(exist_filter)
+                template_list.extend(mmts_num_input)
+                # Module-type dropdown filters (geometry, thickness, etc.)
+                filters = panel.get("filters")
+                if filters:
+                    filter_json = filter_builder.build_template_list(filters, exist_filter)
+                    template_list.extend(filter_json)
+
+            elif chart_type == "mmts_sensor_timeseries":
+                # Sensor dropdown filters (log_location, device_name from mmts_sensors_logging)
+                filters = panel.get("filters")
+                if filters:
+                    filter_json = filter_builder.build_template_list(filters, exist_filter)
+                    template_list.extend(filter_json)
             
         panels_array = panel_builder.generate_panels_json(dashboard_title, config_panels)
             

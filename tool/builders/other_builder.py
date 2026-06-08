@@ -125,6 +125,31 @@ class FilterBuilder:
 
         return template_list
 
+    def build_mmts_filters(self, exist_filter: set) -> list:
+        """Build template variables for MMTS IV dashboards:
+        N_MODULE_SHOW textbox (number of recent tests to display).
+        Module-type dropdown filters are handled via build_template_list.
+        """
+        template_list = []
+
+        if "N_MODULE_SHOW" not in exist_filter:
+            template_list.append({
+                "name": "N_MODULE_SHOW",
+                "type": "textbox",
+                "label": "Number of Tests to Show",
+                "hide": 0,
+                "query": "",
+                "current": {
+                    "text": "20",
+                    "value": "20"
+                },
+                "options": [],
+                "refresh": 0
+            })
+            exist_filter.add("N_MODULE_SHOW")
+
+        return template_list
+
 
 # ============================================================
 # === Input Builder ==========================================
@@ -227,7 +252,8 @@ class IVCurveBuilder:
         latest_iv_test AS (
             SELECT DISTINCT ON (module_name) *
             FROM module_iv_test
-            WHERE $__timeFilter(module_iv_test.date_test)
+            WHERE module_iv_test.date_test >= ($__timeFrom())::date
+            AND module_iv_test.date_test <= ($__timeTo())::date
             AND meas_v IS NOT NULL AND meas_i IS NOT NULL
             AND {temp_condition}
             AND {rel_hum_condition}
@@ -261,15 +287,14 @@ class IVCurveBuilder:
         best_per_module AS (
         SELECT DISTINCT ON (filtered_iv.module_name) *
         FROM filtered_iv
-        WHERE $__timeFilter(filtered_iv.date_test)
-            AND meas_v IS NOT NULL AND meas_i IS NOT NULL
+        WHERE meas_v IS NOT NULL AND meas_i IS NOT NULL
             AND {temp_condition}
             AND {rel_hum_condition}
             AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
             AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
             AND (status_desc = 'Completely Encapsulated' OR status_desc = 'Frontside Encapsulated' OR status_desc = 'Bolted')
             AND array_length(meas_v, 1) = array_length(meas_i, 1)
-        ORDER BY filtered_iv.module_name, i_last ASC
+        ORDER BY filtered_iv.module_name, date_test DESC, mod_ivtest_no DESC
         ),
 
         unnested AS (
@@ -334,10 +359,6 @@ class IVCurveBuilder:
                 },
                 "properties": [
                 {
-                    "id": "max",
-                    "value": 500
-                },
-                {
                     "id": "min",
                     "value": 0
                 },
@@ -348,7 +369,7 @@ class IVCurveBuilder:
                 ]
             }
         ]
-        
+
         return override
 
     def generate_IV_curve_panel_new(self, title: str, raw_sql: str, override: list, gridPos: dict) -> dict:
@@ -469,6 +490,354 @@ class IVCurveBuilder:
         }
 
         return panel_json
+
+
+# ============================================================
+# === MMTS IV Curve Builder ==================================
+# ============================================================
+
+class MMTSIVCurveBuilder(IVCurveBuilder):
+    """Builds IV curve panels for all MMTS-station tests in the time window.
+    Each test appears as a separate series labeled by test ID / module / date.
+    """
+
+    def mmts_filter(self, filters: dict) -> str:
+        """Build the module_info WHERE clause for MMTS queries from the filters dict.
+        Returns a SQL fragment that can be inserted into a WHERE clause.
+        """
+        if not filters:
+            return "TRUE"
+
+        where_clauses = []
+        for filter_table, fields in filters.items():
+            if filter_table == "module_info":
+                for elem in fields:
+                    arg = self.SQLgenerator._build_filter_argument(elem, "module_info")
+                    where_clauses.append(arg)
+
+        return " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+    def _needs_module_info_join(self, filters: dict) -> bool:
+        """Return True when the filters dict references module_info columns."""
+        return bool(filters and filters.get("module_info"))
+
+    def mmts_iv_curve_panel_sql(self, temp_condition: str, rel_hum_condition: str,
+                                 filters: dict = None,
+                                 N_MODULE_SHOW: str = "${N_MODULE_SHOW}") -> str:
+        module_where_arg = self.mmts_filter(filters)
+        join_clause = (
+            "JOIN module_info ON module_iv_test.module_name = module_info.module_name"
+            if self._needs_module_info_join(filters) else ""
+        )
+        raw_sql = rf"""
+        WITH mmts_iv AS (
+            SELECT module_iv_test.*
+            FROM module_iv_test
+            {join_clause}
+            WHERE date_test >= ($__timeFrom())::date
+            AND date_test <= ($__timeTo())::date
+            AND meas_v IS NOT NULL AND meas_i IS NOT NULL
+            AND station_name = 'MMTS'
+            AND {temp_condition}
+            AND {rel_hum_condition}
+            AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+            AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+            AND (status_desc = 'Completely Encapsulated' OR status_desc = 'Frontside Encapsulated' OR status_desc = 'Bolted')
+            AND array_length(meas_v, 1) = array_length(meas_i, 1)
+            AND {module_where_arg}
+            ORDER BY mod_ivtest_no DESC
+            LIMIT {N_MODULE_SHOW}
+        ),
+        unnested AS (
+            SELECT
+                mod_ivtest_no::text || ' / ' || mmts_iv.module_name || ' / ' || date_test::text AS module_name,
+                ABS(v) AS v,
+                ABS(i) AS i
+            FROM mmts_iv,
+            UNNEST(meas_v, meas_i) AS t(v, i)
+        )
+        SELECT * FROM unnested ORDER BY module_name;
+        """
+        return raw_sql
+
+    def mmts_table_panel_sql(self, table_type: str, filters: dict = None) -> str:
+        module_where_arg = self.mmts_filter(filters)
+        join_clause = (
+            "JOIN module_info ON module_iv_test.module_name = module_info.module_name"
+            if self._needs_module_info_join(filters) else ""
+        )
+        if table_type == "log":
+            return f"""
+        SELECT
+            module_iv_test.mod_ivtest_no,
+            module_iv_test.module_name,
+            module_iv_test.date_test,
+            module_iv_test.time_test::text AS time_test,
+            module_iv_test.temp_c,
+            module_iv_test.rel_hum,
+            module_iv_test.status_desc,
+            module_iv_test.grade,
+            module_iv_test.inspector,
+            module_iv_test.comment
+        FROM module_iv_test
+        {join_clause}
+        WHERE module_iv_test.date_test >= ($__timeFrom())::date
+        AND module_iv_test.date_test <= ($__timeTo())::date
+        AND module_iv_test.station_name = 'MMTS'
+        AND {module_where_arg}
+        ORDER BY module_iv_test.mod_ivtest_no DESC;
+        """
+        elif table_type == "summary":
+            return f"""
+        SELECT DISTINCT ON (module_iv_test.module_name)
+            module_iv_test.module_name,
+            module_iv_test.mod_ivtest_no,
+            module_iv_test.date_test,
+            module_iv_test.time_test::text AS time_test,
+            module_iv_test.temp_c,
+            module_iv_test.rel_hum,
+            module_iv_test.status_desc,
+            module_iv_test.grade,
+            ABS(module_iv_test.meas_i[array_length(module_iv_test.meas_i, 1)]) AS i_at_max_v,
+            ABS(module_iv_test.meas_v[array_length(module_iv_test.meas_v, 1)]) AS max_v,
+            module_iv_test.inspector,
+            module_iv_test.comment
+        FROM module_iv_test
+        {join_clause}
+        WHERE module_iv_test.date_test >= ($__timeFrom())::date
+        AND module_iv_test.date_test <= ($__timeTo())::date
+        AND module_iv_test.station_name = 'MMTS'
+        AND module_iv_test.meas_v IS NOT NULL AND module_iv_test.meas_i IS NOT NULL
+        AND {module_where_arg}
+        ORDER BY module_iv_test.module_name, module_iv_test.mod_ivtest_no DESC;
+        """
+        return "SELECT 1;"
+
+    def mmts_timeseries_panel_sql(self, temp_condition: str, rel_hum_condition: str,
+                                   filters: dict = None) -> str:
+        module_where_arg = self.mmts_filter(filters)
+        join_clause = (
+            "JOIN module_info ON module_iv_test.module_name = module_info.module_name"
+            if self._needs_module_info_join(filters) else ""
+        )
+        return rf"""
+        SELECT
+            module_iv_test.date_test::timestamp + module_iv_test.time_test AS "time",
+            module_iv_test.module_name,
+            ABS(module_iv_test.meas_i[array_length(module_iv_test.meas_i, 1)]) AS i_at_max_v
+        FROM module_iv_test
+        {join_clause}
+        WHERE module_iv_test.date_test >= ($__timeFrom())::date
+        AND module_iv_test.date_test <= ($__timeTo())::date
+        AND module_iv_test.meas_v IS NOT NULL AND module_iv_test.meas_i IS NOT NULL
+        AND module_iv_test.station_name = 'MMTS'
+        AND {temp_condition}
+        AND {rel_hum_condition}
+        AND module_iv_test.temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+        AND module_iv_test.rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+        AND (module_iv_test.status_desc = 'Completely Encapsulated' OR module_iv_test.status_desc = 'Frontside Encapsulated' OR module_iv_test.status_desc = 'Bolted')
+        AND array_length(module_iv_test.meas_v, 1) > 0
+        AND {module_where_arg}
+        ORDER BY "time" ASC;
+        """
+
+    def generate_mmts_table_panel(self, title: str, raw_sql: str, gridPos: dict) -> dict:
+        return {
+            "id": 1,
+            "type": "table",
+            "title": title,
+            "gridPos": gridPos,
+            "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": self.datasource_uid
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "thresholds"},
+                    "custom": {
+                        "align": "auto",
+                        "cellOptions": {"type": "auto"},
+                        "inspect": False
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "cellHeight": "sm",
+                "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+                "showHeader": True,
+                "sortBy": []
+            },
+            "pluginVersion": "12.0.0",
+            "targets": [{
+                "datasource": {
+                    "type": "grafana-postgresql-datasource",
+                    "uid": self.datasource_uid
+                },
+                "editorMode": "code",
+                "format": "table",
+                "rawQuery": True,
+                "rawSql": raw_sql,
+                "refId": "A"
+            }],
+            "transformations": []
+        }
+
+    def generate_mmts_timeseries_panel(self, title: str, raw_sql: str, gridPos: dict) -> dict:
+        return {
+            "id": 1,
+            "type": "timeseries",
+            "title": title,
+            "gridPos": gridPos,
+            "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": self.datasource_uid
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "palette-classic"},
+                    "custom": {
+                        "lineWidth": 2,
+                        "pointSize": 6,
+                        "showPoints": "always",
+                        "scaleDistribution": {"log": 10, "type": "log"}
+                    },
+                    "unit": "sci",
+                    "min": 1e-9,
+                    "max": 1e-3
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "list", "placement": "right", "showLegend": True},
+                "tooltip": {"mode": "multi", "sort": "none"}
+            },
+            "pluginVersion": "12.0.0",
+            "targets": [{
+                "datasource": {
+                    "type": "grafana-postgresql-datasource",
+                    "uid": self.datasource_uid
+                },
+                "editorMode": "code",
+                "format": "table",
+                "rawQuery": True,
+                "rawSql": raw_sql,
+                "refId": "A"
+            }],
+            "transformations": [
+                {
+                    "id": "partitionByValues",
+                    "options": {"fields": ["module_name"], "keepFields": False}
+                }
+            ]
+        }
+
+
+# ============================================================
+# === MMTS Sensors Builder ===================================
+# ============================================================
+
+class MMTSSensorsBuilder:
+    """Builds panels for MMTS thermal cycle sensor data from mmts_sensors_logging.
+
+    Table schema (long/EAV format):
+        log_no, log_timestamp, timestamp_utc, log_location, device_name, value, metric
+
+    Metrics observed:
+        temperature_C  → RTD-01…RTD-08, Chiller-01, Chiller-T, Chiller-PrevT
+        dewpoint_C     → DMT-01, DMT-02
+        system_C       → System Status flag
+    """
+
+    def __init__(self, datasource_uid):
+        self.datasource_uid = datasource_uid
+        self.SQLgenerator = BaseSQLGenerator()
+
+    # -- SQL helpers --
+
+    def _build_sensor_filter(self, filters: dict) -> str:
+        """Build a WHERE fragment from filters referencing mmts_sensors_logging columns."""
+        if not filters:
+            return "TRUE"
+        where_clauses = []
+        for filter_table, fields in filters.items():
+            if filter_table == "mmts_sensors_logging":
+                for elem in fields:
+                    arg = self.SQLgenerator._build_filter_argument(elem, "mmts_sensors_logging")
+                    where_clauses.append(arg)
+        return " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+    def mmts_sensor_timeseries_sql(self, metric: str = None, filters: dict = None) -> str:
+        """Generate SQL for a time-series panel from mmts_sensors_logging.
+        When metric is None all metrics are included (combined panel).
+        """
+        sensor_where = self._build_sensor_filter(filters)
+        metric_clause = f"AND metric = '{metric}'" if metric else ""
+        return f"""
+        SELECT
+            timestamp_utc AS "time",
+            device_name,
+            value
+        FROM mmts_sensors_logging
+        WHERE timestamp_utc >= $__timeFrom()::timestamptz
+        AND timestamp_utc <= $__timeTo()::timestamptz
+        {metric_clause}
+        AND {sensor_where}
+        ORDER BY timestamp_utc ASC;
+        """
+
+    # -- Panel JSON generators --
+
+    def generate_mmts_sensor_timeseries_panel(self, title: str, raw_sql: str,
+                                               unit: str, gridPos: dict) -> dict:
+        """Timeseries panel for a single metric (linear scale, partitioned by device_name)."""
+        return {
+            "id": 1,
+            "type": "timeseries",
+            "title": title,
+            "gridPos": gridPos,
+            "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": self.datasource_uid
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "palette-classic"},
+                    "custom": {
+                        "lineWidth": 2,
+                        "pointSize": 4,
+                        "showPoints": "auto",
+                        "scaleDistribution": {"type": "linear"},
+                        "axisCenteredZero": False,
+                        "hideFrom": {"tooltip": False, "viz": False, "legend": False}
+                    },
+                    "unit": unit
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "list", "placement": "right", "showLegend": True, "calcs": []},
+                "tooltip": {"mode": "multi", "sort": "none"}
+            },
+            "pluginVersion": "12.0.0",
+            "targets": [{
+                "datasource": {
+                    "type": "grafana-postgresql-datasource",
+                    "uid": self.datasource_uid
+                },
+                "editorMode": "code",
+                "format": "table",
+                "rawQuery": True,
+                "rawSql": raw_sql,
+                "refId": "A"
+            }],
+            "transformations": [
+                {
+                    "id": "partitionByValues",
+                    "options": {"fields": ["device_name"], "keepFields": False}
+                }
+            ]
+        }
 
 
 # ============================================================
@@ -1560,10 +1929,6 @@ class ComponentsLookUpFormBuilder:
                     "options": "v"
                     },
                     "properties": [
-                    {
-                        "id": "max",
-                        "value": 500
-                    },
                     {
                         "id": "min",
                         "value": 0
@@ -4480,22 +4845,80 @@ class ModuleAssemblyBuilder:
                 ORDER BY module_name, mod_qc_no DESC
                 ),
 
-                temp_table_2 AS (
-                SELECT DISTINCT ON (module_name) *
+                iv_dry_rt AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
                 FROM module_iv_test
-                WHERE status = 7 OR status = 8
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND (temp_c::float >= 10 AND temp_c::float <= 30)
+                AND rel_hum::float <= 12
+                AND $__timeFilter(date_test)
                 AND ('$module_name' = '' OR module_name = '${self.module_name}')
-                ORDER BY module_name, temp_c DESC
+                ORDER BY module_name, mod_ivtest_no DESC
                 ),
 
-                temp_table_3 AS (
-                SELECT DISTINCT ON (module_name) *
-                FROM module_pedestal_test
-                WHERE status = 7 OR status = 8
+                iv_ambient_rt AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
+                FROM module_iv_test
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND (temp_c::float >= 10 AND temp_c::float <= 30)
+                AND rel_hum::float >= 20
+                AND $__timeFilter(date_test)
                 AND ('$module_name' = '' OR module_name = '${self.module_name}')
-                ORDER BY module_name, temp_c DESC
+                ORDER BY module_name, mod_ivtest_no DESC
+                ),
+
+                iv_dry_cold AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
+                FROM module_iv_test
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND temp_c::float < 10
+                AND $__timeFilter(date_test)
+                AND ('$module_name' = '' OR module_name = '${self.module_name}')
+                ORDER BY module_name, mod_ivtest_no DESC
+                ),
+
+                ped_dry_rt AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
+                FROM module_pedestal_test
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND (temp_c::float >= 10 AND temp_c::float <= 30)
+                AND rel_hum::float <= 12
+                AND $__timeFilter(date_test)
+                AND ('$module_name' = '' OR module_name = '${self.module_name}')
+                ORDER BY module_name, mod_pedtest_no DESC
+                ),
+
+                ped_ambient_rt AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
+                FROM module_pedestal_test
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND rel_hum ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND (temp_c::float >= 10 AND temp_c::float <= 30)
+                AND rel_hum::float >= 20
+                AND $__timeFilter(date_test)
+                AND ('$module_name' = '' OR module_name = '${self.module_name}')
+                ORDER BY module_name, mod_pedtest_no DESC
+                ),
+
+                ped_dry_cold AS (
+                SELECT DISTINCT ON (module_name) module_name, date_test
+                FROM module_pedestal_test
+                WHERE (status = 7 OR status = 8)
+                AND temp_c ~ '^[-+]?[0-9]+(\.[0-9]+)?$'
+                AND temp_c::float < 10
+                AND $__timeFilter(date_test)
+                AND ('$module_name' = '' OR module_name = '${self.module_name}')
+                ORDER BY module_name, mod_pedtest_no DESC
                 )
-        SELECT 
+        SELECT
             temp_table_0.module_name::text,
             temp_table_0.assembled::text,
             temp_table_1.final_grade::text,
@@ -4503,16 +4926,23 @@ class ModuleAssemblyBuilder:
             temp_table_0.encap_back::text,
             temp_table_0.wb_front::text,
             temp_table_0.encap_front::text,
-            temp_table_2.temp_c::text,
-            temp_table_2.date_test::text AS test_iv,
-            temp_table_3.date_test::text AS test_ped,
+            iv_dry_rt.date_test::text AS test_iv_dry_rt,
+            iv_ambient_rt.date_test::text AS test_iv_ambient_rt,
+            iv_dry_cold.date_test::text AS test_iv_dry_cold,
+            ped_dry_rt.date_test::text AS test_ped_dry_rt,
+            ped_ambient_rt.date_test::text AS test_ped_ambient_rt,
+            ped_dry_cold.date_test::text AS test_ped_dry_cold,
             temp_table_0.xml_upload_success::text,
             temp_table_0.packed_datetime::text,
             temp_table_0.shipped_datetime::text
         FROM temp_table_0
         LEFT JOIN temp_table_1 ON temp_table_0.module_name = temp_table_1.module_name
-        LEFT JOIN temp_table_2 ON temp_table_0.module_name = temp_table_2.module_name
-        LEFT JOIN temp_table_3 ON temp_table_0.module_name = temp_table_3.module_name
+        LEFT JOIN iv_dry_rt ON temp_table_0.module_name = iv_dry_rt.module_name
+        LEFT JOIN iv_ambient_rt ON temp_table_0.module_name = iv_ambient_rt.module_name
+        LEFT JOIN iv_dry_cold ON temp_table_0.module_name = iv_dry_cold.module_name
+        LEFT JOIN ped_dry_rt ON temp_table_0.module_name = ped_dry_rt.module_name
+        LEFT JOIN ped_ambient_rt ON temp_table_0.module_name = ped_ambient_rt.module_name
+        LEFT JOIN ped_dry_cold ON temp_table_0.module_name = ped_dry_cold.module_name
         WHERE 
                 ('All' = ANY(ARRAY[${self.bp_material}]) OR 
                 (temp_table_0.bp_material IS NULL AND 'NULL' = ANY(ARRAY[${self.bp_material}])) OR 
