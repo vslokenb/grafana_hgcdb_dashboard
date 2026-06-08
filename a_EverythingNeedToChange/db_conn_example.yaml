@@ -2,9 +2,17 @@
 
 dbname: 'hgcdb'
 port: '5432'
-db_hostname: 'localhost'  # 'localhost'
+db_hostname: 'localhost'
 institution_abbr: ''  # update this: CMU, IHEP, NTU, TTU, TIFR, UCSB
 
-user: 'viewer'  # recommended
-password: ''  # your password
+user: 'viewer'  # recommended — read-only Grafana datasource user
+password: ''    # your password
+
+# PLC database (thermal cycle / environment monitoring dashboards)
+# Leave plc_db_hostname empty to skip PLC datasource registration.
+plc_db_hostname: ''   # e.g. 192.168.50.32
+plc_db_port: '5432'
+plc_dbname: ''        # PLC database name
+plc_user: ''          # PLC database user
+plc_password: ''      # PLC database password
 

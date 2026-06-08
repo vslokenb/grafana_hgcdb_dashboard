@@ -11,8 +11,11 @@ Create a service account and get the API key to connect to Grafana.
 sa_name = f"{INSTITUTION}-service-account"
 token_name = f"{INSTITUTION}-sa-token"
 
-# Create service account
-sa_id, api_key = client.create_service_account_and_token(sa_name, token_name, GF_USER, GF_PASS)
+# Service account creation requires Server Admin — use super credentials if available
+sa_user = GF_SUPER_USER if GF_SUPER_USER else GF_USER
+sa_pass = GF_SUPER_PASS if GF_SUPER_USER else GF_PASS
+
+sa_id, api_key = client.get_or_create_service_account_token(sa_name, token_name, sa_user, sa_pass)
 
 # Update gf_conn
 gf_conn.set('GF_SA_ID', sa_id)
