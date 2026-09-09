@@ -1,4 +1,4 @@
-import os,sys
+import os
 import subprocess
 from time import sleep
 
@@ -47,10 +47,9 @@ def main():
         print(" >>>> preSteps skipped.\n")
 
     # Everything Need To Generate
-    subprocess.run([sys.executable, "create/create_folders.py"], check=True)
+    subprocess.run(["python3", "create/create_folders.py"], check=True)
     sleep(0.5)    # wait for folders to be added
-    subprocess.run([sys.executable, "create/create_dashboards.py"], check=True)
-    subprocess.run([sys.executable, "create/create_static_dashboards.py"], check=True)
+    subprocess.run(["python3", "create/create_dashboards.py"], check=True)
     # subprocess.run(["python", "create/create_alerts.py"], check=True)
 
     # Add run times
