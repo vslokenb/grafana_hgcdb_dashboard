@@ -6,7 +6,7 @@ import yaml
 
 from tool.helper import *
 from tool import DashboardValidator
-from tool import PanelBuilder, FilterBuilder, InputBuilder, DashboardBuilder, ComponentsLookUpFormBuilder, HexmapPlotsBuilder, OffsetPlotsBuilder, GeneralInfoBuilder, ModuleAssemblyBuilder, XMLSuccessBuilder
+from tool import PanelBuilder, FilterBuilder, InputBuilder, DashboardBuilder, ComponentsLookUpFormBuilder, HexmapPlotsBuilder, OffsetPlotsBuilder, GeneralInfoBuilder, ModuleAssemblyBuilder, XMLSuccessBuilder, ModuleGradesBuilder, MMTSLoggingBuilder, MMTSBatchLoggingBuilder, AllDataBuilder, MMTSIVGradesBuilder
 
 """
 This script generates all the dashboards json_file, saves them to a folder under `grafana_hgcdb_dashboard`, and uploads them to grafana.
@@ -26,6 +26,11 @@ offset_plots_builder = OffsetPlotsBuilder(GF_DS_UID, TIME_ZONE)
 general_info_builder = GeneralInfoBuilder(GF_DS_UID, TIME_ZONE)
 module_assembly_builder = ModuleAssemblyBuilder(GF_DS_UID, TIME_ZONE)
 xml_success_builder = XMLSuccessBuilder(GF_DS_UID, TIME_ZONE)
+module_grades_builder = ModuleGradesBuilder(GF_DS_UID, TIME_ZONE)
+mmts_logging_builder = MMTSLoggingBuilder(GF_DS_UID, TIME_ZONE)
+mmts_batch_logging_builder = MMTSBatchLoggingBuilder(GF_DS_UID, TIME_ZONE)
+all_data_builder = AllDataBuilder(GF_DS_UID)
+mmts_iv_grades_builder = MMTSIVGradesBuilder(GF_DS_UID, TIME_ZONE)
 
 # Check if succeed:
 succeed = True      # assert every file generated successfully
@@ -113,15 +118,51 @@ for config in filelist:
             dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
             continue
 
+        elif dashboard_title == "Module Grades":
+            dashboard_json = module_grades_builder.generate_dashboard_json()
+            # Export the dashboard json to a file
+            file_name = config.split(".")[0]
+            dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
+            continue
+
+        elif dashboard_title == "MMTS Environment Logging":
+            dashboard_json = mmts_logging_builder.generate_dashboard_json()
+            # Export the dashboard json to a file
+            file_name = config.split(".")[0]
+            dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
+            continue
+
+        elif dashboard_title == "MMTS Batch Logging":
+            dashboard_json = mmts_batch_logging_builder.generate_dashboard_json()
+            # Export the dashboard json to a file
+            file_name = config.split(".")[0]
+            dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
+            continue
+
+        elif dashboard_title == "All Data":
+            dashboard_json = all_data_builder.generate_dashboard_json()
+            # Export the dashboard json to a file
+            file_name = config.split(".")[0]
+            dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
+            continue
+
+        elif dashboard_title == "MMTS IV Grades by Position":
+            dashboard_json = mmts_iv_grades_builder.generate_dashboard_json()
+            # Export the dashboard json to a file
+            file_name = config.split(".")[0]
+            dashboard_builder.save_dashboard_json(dashboard, dashboard_json, file_name)
+            continue
+
         # Loop for every panel in a dashboard
         for panel in config_panels:
-            special_chart_type = ["text", "xychart", "mmts_xychart", "mmts_table", "mmts_timeseries", "mmts_sensor_timeseries"]
+            special_chart_type = ["text", "xychart"]    # skip `text` and `xychart` panels
             chart_type = panel["chart_type"]
 
             # Generate the template json
             if chart_type not in special_chart_type:
-                filters = panel.get("filters")
-                inputs = panel.get("inputs")
+                filters = panel["filters"]
+                inputs = panel.get("inputs", None)
+                contains_inputs = panel.get("contains_inputs", None)
                 if filters:
                     filter_json = filter_builder.build_template_list(filters, exist_filter)
                     template_list.extend(filter_json)
@@ -129,33 +170,30 @@ for config in filelist:
                     input_builder = InputBuilder()
                     input_json = input_builder.build_template_list(inputs, exist_filter)
                     template_list.extend(input_json)
+                if contains_inputs:
+                    input_builder = InputBuilder()
+                    input_json = input_builder.build_template_list(contains_inputs, exist_filter)
+                    template_list.extend(input_json)
 
             elif chart_type == "xychart":
-                filters = panel.get("filters")
+                filters = panel["filters"]
+                contains_inputs = panel.get("contains_inputs", None)
                 # special case for IV curve
-                module_num_input = filter_builder.build_iv_curve_filters(exist_filter)
+                is_mmts_iv_page = dashboard_title == "MMTS IV_Curve Plot"
+                module_num_input = filter_builder.build_iv_curve_filters(
+                    exist_filter,
+                    include_best_only=not is_mmts_iv_page,
+                    include_module_show=not is_mmts_iv_page,
+                )
                 template_list.extend(module_num_input)
                 # regular filters
-                if filters:
-                    filter_json = filter_builder.build_template_list(filters, exist_filter)
-                    template_list.extend(filter_json)
-
-            elif chart_type in ("mmts_xychart", "mmts_table", "mmts_timeseries"):
-                # N_MODULE_SHOW textbox (shared across all MMTS panels in this dashboard)
-                mmts_num_input = filter_builder.build_mmts_filters(exist_filter)
-                template_list.extend(mmts_num_input)
-                # Module-type dropdown filters (geometry, thickness, etc.)
-                filters = panel.get("filters")
-                if filters:
-                    filter_json = filter_builder.build_template_list(filters, exist_filter)
-                    template_list.extend(filter_json)
-
-            elif chart_type == "mmts_sensor_timeseries":
-                # Sensor dropdown filters (log_location, device_name from mmts_sensors_logging)
-                filters = panel.get("filters")
-                if filters:
-                    filter_json = filter_builder.build_template_list(filters, exist_filter)
-                    template_list.extend(filter_json)
+                filter_json = filter_builder.build_template_list(filters, exist_filter)
+                template_list.extend(filter_json)
+                # textbox contains-inputs (e.g. batch_name, iteration, station_name)
+                if contains_inputs:
+                    input_builder = InputBuilder()
+                    input_json = input_builder.build_template_list(contains_inputs, exist_filter)
+                    template_list.extend(input_json)
             
         panels_array = panel_builder.generate_panels_json(dashboard_title, config_panels)
             

@@ -15,6 +15,7 @@ class DashboardBuilder:
     def build_dashboard(self, dashboard_title: str, panels: list, template_list: list) -> dict:
         """Generates a Grafana dashboard json file based on the given panels.
         """
+        # get dashboard_uid
         dashboard_uid = create_uid(dashboard_title)
 
         # define the time range
@@ -60,7 +61,8 @@ class DashboardBuilder:
             "timepicker": {},
             "timezone": "browser",
             "title": dashboard_title,
-            "uid": dashboard_uid
+            "uid": dashboard_uid,
+            "version": 1
         }
 
         return dashboard
@@ -99,26 +101,9 @@ class DashboardBuilder:
             folder_uid = ""
         else:
             folder_uid_map = gf_conn.get("GF_FOLDER_UIDS", {})
-            folder_uid = folder_uid_map.get(folder_name)
-
-            if not folder_uid:
-                # UID was never saved (e.g. folder creation failed on a previous run).
-                # Search Grafana live so this run can still upload.
-                resp = requests.get(
-                    f"{GF_URL}/api/folders",
-                    headers=client.headers,
-                    params={"limit": 200}
-                )
-                if resp.status_code == 200:
-                    for f in resp.json():
-                        if f.get("title") == folder_name:
-                            folder_uid = f["uid"]
-                            gf_conn.set(f"GF_FOLDER_UIDS.{folder_name}", folder_uid)
-                            gf_conn.save()
-                            break
-
-            if not folder_uid:
-                raise ValueError(f"Folder '{folder_name}' not found in Grafana — run create_folders.py first")
+            if folder_name not in folder_uid_map:
+                raise ValueError(f"Dashboard Folder '{folder_name}' not in GF_DASHBOARD_FOLDER_UIDS")
+            folder_uid = folder_uid_map[folder_name]
 
         with open(file_path, 'r', encoding='utf-8') as file:
             dashboard_json = json.load(file)

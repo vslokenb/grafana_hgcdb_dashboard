@@ -2,3 +2,5 @@ from .alert_builder import *
 from .dashboard_builder import *
 from .other_builder import *
 from .panel_builder import *
+from .mmts_logging_builder import *
+from .mmts_batch_logging_builder import *
